@@ -1,0 +1,100 @@
+name: release
+
+on: 
+  push:
+    branches:
+      - main
+
+jobs:
+  tag-next-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_next_version.outputs.version }}
+      hasNextVersion: ${{ steps.get_next_version.outputs.hasNextVersion }}
+    permissions:
+      contents: write
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v7.0.1
+      with:
+        fetch-depth: '0'
+    - name: Get next version
+      id: get_next_version
+      uses: thenativeweb/get-next-version@2.8.1
+      with:
+        prefix: 'v'
+    - name: Create tag
+      if: ${{ steps.get_next_version.outputs.hasNextVersion == 'true' }}
+      run: |
+        git tag ${{ steps.get_next_version.outputs.version }}
+        git push origin ${{ steps.get_next_version.outputs.version }}
+
+
+  build-gh-release:
+    needs: tag-next-version
+    if: ${{ needs.tag-next-version.outputs.hasNextVersion == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v7.0.1
+    - name: go vorbereiten
+      uses: actions/setup-go@v5.3.0
+      with:
+        go-version: '1.27'
+    - name: Build
+      env:
+        KAST_VERSION: ${{ needs.tag-next-version.outputs.version }}
+      run: |
+        mkdir -p release/assets
+        go mod download
+        
+        GOOS=linux GOARCH=amd64 go build -ldflags "-X \"main.kastVersion=${KAST_VERSION}\" -X \"main.compileDate=$(date)\"" -o release/kast-linux-amd64 ./cmd/kast
+        tar cvfJ release/assets/kast-linux-amd64.tar.xz release/kast-linux-amd64
+
+        GOOS=linux GOARCH=arm64 go build -ldflags "-X \"main.kastVersion=${KAST_VERSION}\" -X \"main.compileDate=$(date)\"" -o release/kast-linux-arm64 ./cmd/kast
+        tar cvfJ release/assets/kast-linux-arm64.tar.xz release/kast-linux-arm64
+
+        GOOS=windows GOARCH=amd64 go build -ldflags "-X \"main.kastVersion=${KAST_VERSION}\" -X \"main.compileDate=$(date)\"" -o release/kast-windows-amd64.exe ./cmd/kast
+        zip release/assets/kast-windows-amd64.zip release/kast-windows-amd64.exe
+
+        GOOS=windows GOARCH=arm64 go build -ldflags "-X \"main.kastVersion=${KAST_VERSION}\" -X \"main.compileDate=$(date)\"" -o release/kast-windows-arm64.exe ./cmd/kast
+        zip release/assets/kast-windows-arm64.zip release/kast-windows-arm64.exe
+
+        GOOS=darwin GOARCH=amd64 go build -ldflags "-X \"main.kastVersion=${KAST_VERSION}\" -X \"main.compileDate=$(date)\"" -o release/kast-darwin-amd64 ./cmd/kast
+        tar cvfJ release/assets/kast-darwin-amd64.tar.xz release/kast-darwin-amd64
+
+        GOOS=darwin GOARCH=arm64 go build -ldflags "-X \"main.kastVersion=${KAST_VERSION}\" -X \"main.compileDate=$(date)\"" -o release/kast-darwin-arm64 ./cmd/kast
+        tar cvfJ release/assets/kast-darwin-arm64.tar.xz release/kast-darwin-arm64
+
+    - name: Github-Release erstellen
+      uses: ncipollo/release-action@v1.21.0
+      with:
+        artifacts: "release/assets/*"
+        tag: ${{ needs.tag-next-version.outputs.version }}
+
+        
+  build-docker:
+    needs: tag-next-version
+    if: ${{ needs.tag-next-version.outputs.hasNextVersion == 'true' }}
+    runs-on: ubuntu-latest    
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-qemu-action@v3.4.0
+      - uses: docker/setup-buildx-action@v4.3.0
+
+      - uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v7.3.0
+        with:
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: KAST_VERSION=${{ needs.tag-next-version.outputs.version }}
+          tags: ghcr.io/${{ github.repository_owner }}/kast:${{ needs.tag-next-version.outputs.version }}-kubectl,ghcr.io/${{ github.repository_owner }}/kast:latest-kubectl
